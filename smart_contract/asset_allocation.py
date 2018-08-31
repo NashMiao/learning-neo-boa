@@ -11,6 +11,7 @@ ctx = GetContext()
 contract_address = bytearray(b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01')
 
 OnTransfer = RegisterAction('transfer', 'address_from', 'address_to', 'amount')
+decimal = 9
 
 
 def create_template(rule):
@@ -49,12 +50,14 @@ def create_instance(template_id, metadata, payments, payer_threshold, payees, re
         data = concat(template_id, current_block_timestamp)
         data = concat(data, str(count))
         instance_id = sha256(data)
+        book = dict()
         Put(ctx, concat(instance_id, 'metadata'), metadata)
         Put(ctx, concat(instance_id, 'payments'), payments)
         Put(ctx, concat(instance_id, 'threshold'), payer_threshold)
         Put(ctx, concat(instance_id, 'payees'), payees)
         Put(ctx, concat(instance_id, 'reviewer'), reviewer)
         Put(ctx, concat(instance_id, 'balance'), 0)
+        Put(ctx, concat(instance_id, 'book'), book)
         Put(ctx, concat(instance_id, 'lock'), False)
         Notify(['create', instance_id])
         count += 1
@@ -77,8 +80,14 @@ def input_asset(instance_id, amount, payer):
         return False
     else:
         OnTransfer(payer, script_hash, amount)
+        book = Get(ctx, concat(instance_id, 'book'))
         balance = Get(ctx, concat(instance_id, 'balance'))
         balance += amount
+        if has_key(book, payer):
+            book[payer] += amount
+        else:
+            book[payer] = amount
+        Put(ctx, concat(instance_id, 'book'), book)
         Put(ctx, concat(instance_id, 'balance'), balance)
         Notify(['input', instance_id, amount, payer])
 
@@ -117,16 +126,27 @@ def confirm(instance_id, confirmer):
         from_acct = GetExecutingScriptHash()
         payees = Get(ctx, concat(instance_id, 'payees'))
         balance = Get(ctx, concat(instance_id, 'balance'))
-        quota = Get(ctx, concat(instance_id, 'reviewerQuota'))
-        if len(quota) == 0:
-            quota = Get(ctx, instance_id)
-        for index in range(0, len(payees)):
-            amount = balance * quota[index]
-            param = state(from_acct, payees[index], amount)
-            Invoke(amount, contract_address, 'transfer', [param])
-        Put(ctx, concat(instance_id, 'lock'), False)
-        Notify(["Confirm", instance_id, confirmer])
-        return True
+        if Get(ctx, concat(instance_id, 'remainBalance')):
+            Notify('Already confirmed!')
+            return False
+        else:
+            remain_balance = balance
+            quota = Get(ctx, concat(instance_id, 'reviewerQuota'))
+            if len(quota) == 0:
+                quota = Get(ctx, instance_id)
+            for index in range(0, len(payees)):
+                amount = round(balance * quota[index], decimal)
+                if remain_balance < amount:
+                    amount = remain_balance
+                param = state(from_acct, payees[index], amount)
+                Invoke(amount, contract_address, 'transfer', [param])
+                remain_balance -= amount
+            Put(ctx, concat(instance_id, 'remainBalance'), remain_balance)
+            Put(ctx, concat(instance_id, 'lock'), False)
+            Notify(["Confirm", instance_id, confirmer])
+            if remain_balance > 0:
+                remain_balance(instance_id, confirmer)
+            return True
 
 
 def set_quota(instance_id, quota, reviewer):
@@ -156,6 +176,19 @@ def refund(instance_id, operator):
     :param operator: str
     """
     if CheckWitness(operator):
+        from_acct = GetExecutingScriptHash()
+        book = Get(ctx, concat(instance_id, 'book'))
+        balance = Get(ctx, concat(instance_id, 'balance'))
+        remain_balance = Get(ctx, concat(instance_id, 'remainBalance'))
+        for k in keys(book):
+            input_sum = book[k]
+            amount = round(remain_balance * (input_sum / balance), decimal)
+            if remain_balance < amount:
+                amount = remain_balance
+                param = state(from_acct, k, amount)
+                Invoke(amount, contract_address, 'transfer', [param])
+                remain_balance -= amount
+            Put(ctx, concat(instance_id, 'remainBalance'), remain_balance)
         Notify(['Refund', instance_id, operator])
         return True
     else:
@@ -190,7 +223,7 @@ def main(operation, args):
             return False
     elif operation == 'lock':
         if len(args) == 3:
-            return
+            return lock(args[0], args[1], args[2])
     elif operation == 'confirm':
         if len(args) == 2:
             return confirm(args[0], args[1])
