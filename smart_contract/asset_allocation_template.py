@@ -1,9 +1,10 @@
+from boa.interop.System.Storage import *
+from boa.interop.System.Runtime import *
+
 from boa.interop.Neo.Action import RegisterAction
 from boa.interop.System.ExecutionEngine import *
 from boa.interop.Ontology.Native import *
 from boa.interop.Neo.Blockchain import *
-from boa.interop.Neo.Storage import *
-from boa.interop.Neo.Runtime import *
 from boa.interop.Neo.Block import *
 from boa.builtins import *
 
@@ -21,8 +22,12 @@ def create_template(rule):
     """
     try:
         str_value = ''
+        percent = 0
         for q in range(0, len(rule)):
             str_value = str_value + str(rule[q])
+            percent += rule[q]
+        if percent > 10000:
+            return False
         template_id = sha256(str_value)
         Put(ctx, template_id, rule)
         Log(template_id)
