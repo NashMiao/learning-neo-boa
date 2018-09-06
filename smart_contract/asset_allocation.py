@@ -32,12 +32,13 @@ def create_template(rule):
         return False
 
 
-def create_instance(template_id, metadata, payments, payer_threshold, payees, reviewer):
+def create_instance(template_id, metadata, payments, payer_threshold, payee_threshold, payees, reviewer):
     """
     :param template_id: int
     :param metadata: str
     :param payments: tuple
     :param payer_threshold: int
+    :param payee_threshold: int
     :param payees: list
     :param reviewer: str
     :return: bool
@@ -49,11 +50,12 @@ def create_instance(template_id, metadata, payments, payer_threshold, payees, re
         count = Get(ctx, concat(template_id, 'count'))
         data = concat(template_id, current_block_timestamp)
         data = concat(data, str(count))
-        instance_id = sha256(data)
+        instance_id = hash160(data)
         book = dict()
         Put(ctx, concat(instance_id, 'metadata'), metadata)
         Put(ctx, concat(instance_id, 'payments'), payments)
-        Put(ctx, concat(instance_id, 'threshold'), payer_threshold)
+        Put(ctx, concat(instance_id, 'payer_threshold'), payer_threshold)
+        Put(ctx, concat(instance_id, 'payee_threshold'), payee_threshold)
         Put(ctx, concat(instance_id, 'payees'), payees)
         Put(ctx, concat(instance_id, 'reviewer'), reviewer)
         Put(ctx, concat(instance_id, 'balance'), 0)
@@ -74,6 +76,10 @@ def input_asset(instance_id, amount, payer):
     :param amount: int
     :param payer: str
     """
+    # check whether instance_id exist
+    metadata = Get(ctx, concat(instance_id, 'metadata'))
+    if len(metadata) == 0:
+        return False
     script_hash = GetExecutingScriptHash()
     is_lock = Get(ctx, concat(instance_id, 'lock'))
     if is_lock:
@@ -92,20 +98,26 @@ def input_asset(instance_id, amount, payer):
         Notify(['input', instance_id, amount, payer])
 
 
-def lock(instance_id, lock_time, payers):
+def lock(instance_id, lock_time, lockers):
     """
 
     :param instance_id: str
     :param lock_time: str
-    :param payers: list
+    :param lockers: list
     """
+    # check whether instance_id exist
+    metadata = Get(ctx, concat(instance_id, 'metadata'))
+    if len(metadata) == 0:
+        return False
+    for index in range(0, len(lockers)):
+        CheckWitness(lockers[index])
     is_lock = Get(ctx, concat(instance_id, 'lock'))
     if is_lock:
         return False
     else:
         Put(ctx, concat(instance_id, 'lock'), True)
         Put(ctx, concat(instance_id, 'lockTime'), lock_time)
-        Put(ctx, concat(instance_id, 'payers'), payers)
+        Put(ctx, concat(instance_id, 'lockers'), lockers)
         Notify(['Lock', instance_id])
         return True
 
@@ -116,47 +128,61 @@ def confirm(instance_id, confirmer):
     :param instance_id: str
     :param confirmer: list
     """
+    # check whether instance_id is exist
+    metadata = Get(ctx, concat(instance_id, 'metadata'))
+    if len(metadata) == 0:
+        return False
+    # check lock time
     current_height = GetHeight()
     current_block = GetBlock(current_height)
     current_block_timestamp = current_block.Timestamp
     lock_time = Get(ctx, concat(instance_id, 'lockTime'))
     if current_block_timestamp < lock_time:
         return False
-    else:
-        from_acct = GetExecutingScriptHash()
-        payees = Get(ctx, concat(instance_id, 'payees'))
-        balance = Get(ctx, concat(instance_id, 'balance'))
-        if Get(ctx, concat(instance_id, 'remainBalance')):
-            Notify('Already confirmed!')
+    # check whether already confirmed
+    if Get(ctx, concat(instance_id, 'remainBalance')):
+        Notify('Already confirmed!')
+        return False
+    # check whether reviewer is exist
+    # if exist, check whether the quota is setting
+    reviewer = Get(ctx, concat(instance_id, 'reviewer'))
+    if len(reviewer) != 0:
+        quota = Get(ctx, concat(instance_id, 'reviewerQuota'))
+        if len(quota) == 0:
             return False
-        else:
-            remain_balance = balance
-            quota = Get(ctx, concat(instance_id, 'reviewerQuota'))
-            if len(quota) == 0:
-                quota = Get(ctx, instance_id)
-            for index in range(0, len(payees)):
-                amount = round(balance * quota[index], decimal)
-                if remain_balance < amount:
-                    amount = remain_balance
-                param = state(from_acct, payees[index], amount)
-                Invoke(amount, contract_address, 'transfer', [param])
-                remain_balance -= amount
-            Put(ctx, concat(instance_id, 'remainBalance'), remain_balance)
-            Put(ctx, concat(instance_id, 'lock'), False)
-            Notify(["Confirm", instance_id, confirmer])
-            if remain_balance > 0:
-                remain_balance(instance_id, confirmer)
-            return True
+    else:
+        quota = Get(ctx, instance_id)
+    from_acct = GetExecutingScriptHash()
+    payees = Get(ctx, concat(instance_id, 'payees'))
+    balance = Get(ctx, concat(instance_id, 'balance'))
+    remain_balance = balance
+    for index in range(0, len(payees)):
+        amount = round(balance * quota[index], decimal)
+        if remain_balance < amount:
+            amount = remain_balance
+        param = state(from_acct, payees[index], amount)
+        Invoke(amount, contract_address, 'transfer', [param])
+        remain_balance -= amount
+    Put(ctx, concat(instance_id, 'remainBalance'), remain_balance)
+    Put(ctx, concat(instance_id, 'lock'), False)
+    Notify(["Confirm", instance_id, confirmer])
+    if remain_balance > 0:
+        remain_balance(instance_id, confirmer)
+    return True
 
 
-def set_quota(instance_id, quota, reviewer):
+def set_quota(instance_id, quota):
     """
 
     :param instance_id: str
     :param quota: list
-    :param reviewer: str
     :return:
     """
+    # check whether instance_id exist
+    metadata = Get(ctx, concat(instance_id, 'metadata'))
+    if len(metadata) == 0:
+        return False
+    reviewer = Get(ctx, concat(instance_id, 'reviewer'))
     if CheckWitness(reviewer):
         payees = Get(ctx, concat(instance_id, 'payees'))
         if len(payees) > len(quota):
@@ -175,6 +201,15 @@ def refund(instance_id, operator):
     :param instance_id: str
     :param operator: str
     """
+    # check whether instance_id exist
+    metadata = Get(ctx, concat(instance_id, 'metadata'))
+    if len(metadata) == 0:
+        return False
+    # check whether reviewer exist
+    reviewer = Get(ctx, concat(instance_id, 'reviewer'))
+    if len(reviewer) == 0:
+        return False
+    # TODO： 评审人+一方
     if CheckWitness(operator):
         from_acct = GetExecutingScriptHash()
         book = Get(ctx, concat(instance_id, 'book'))
@@ -230,8 +265,8 @@ def main(operation, args):
         else:
             return False
     elif operation == 'set_quota':
-        if len(args) == 3:
-            return set_quota(args[0], args[1], args[2])
+        if len(args) == 2:
+            return set_quota(args[0], args[1])
         else:
             return False
     elif operation == 'refund':
